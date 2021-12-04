@@ -13324,7 +13324,7 @@ namespace ts {
                 const aliasSymbol = getAliasSymbolForTypeNode(node);
                 const newAliasSymbol = aliasSymbol && (isLocalTypeAlias(symbol) || !isLocalTypeAlias(aliasSymbol)) ? aliasSymbol : undefined;
                 return getTypeAliasInstantiation(symbol, typeArgumentsFromTypeReferenceNode(node), newAliasSymbol, getTypeArgumentsForAliasSymbol(newAliasSymbol));
-            }
+            } // TODO: jsx-ng can be example for instantiate
             return checkNoTypeArguments(node, symbol) ? type : errorType;
         }
 
@@ -26550,9 +26550,16 @@ namespace ts {
         }
 
         function getEffectiveFirstArgumentForJsxSignature(signature: Signature, node: JsxOpeningLikeElement) {
+            if (isJsxInUniversalMode(node)) {
+                return getJsxPropsTypeInUniversalMode(signature);
+            }
             return getJsxReferenceKind(node) !== JsxReferenceKind.Component
                 ? getJsxPropsTypeFromCallSignature(signature, node)
                 : getJsxPropsTypeFromClassType(signature, node);
+        }
+
+        function getJsxPropsTypeInUniversalMode(sig: Signature) {
+            return getTypeOfFirstParameterOfSignatureWithFallback(sig, unknownType);
         }
 
         function getJsxPropsTypeFromCallSignature(sig: Signature, context: JsxOpeningLikeElement) {
@@ -27311,7 +27318,7 @@ namespace ts {
             else {
                 checkExpression(node.closingElement.tagName);
             }
-
+            // TODO: jsx-ng check children
             checkJsxChildren(node);
         }
 
@@ -27655,6 +27662,13 @@ namespace ts {
             }
             return undefined;
         }
+        // TODO: jsx-ng
+        function isJsxInUniversalMode(location: Node | undefined) {
+            const jsxNamespace = getJsxNamespaceAt(location);
+            const exports = jsxNamespace && getExportsOfSymbol(jsxNamespace);
+            const typeSymbol = exports && getSymbol(exports, JsxNames.UniversalMode, SymbolFlags.Type);
+            return !!typeSymbol;
+        }
 
         function getJsxLibraryManagedAttributes(jsxNamespace: Symbol) {
             // JSX.LibraryManagedAttributes [symbol]
@@ -27816,7 +27830,7 @@ namespace ts {
                 }
             }
         }
-
+        // TODO: jsx-ng check opening
         function checkJsxOpeningLikeElementOrOpeningFragment(node: JsxOpeningLikeElement | JsxOpeningFragment) {
             const isNodeOpeningLikeElement = isJsxOpeningLikeElement(node);
 
@@ -27859,7 +27873,7 @@ namespace ts {
                     }
                 }
             }
-
+            // TODO: jsx-ng check type here
             if (isNodeOpeningLikeElement) {
                 const jsxOpeningLikeNode = node as JsxOpeningLikeElement;
                 const sig = getResolvedSignature(jsxOpeningLikeNode);
@@ -30780,7 +30794,7 @@ namespace ts {
 
             return resolveCall(node, callSignatures, candidatesOutArray, checkMode, SignatureFlags.None, headMessage);
         }
-
+        // TODO: jsx-ng use this function to find callers
         function createSignatureForJSXIntrinsic(node: JsxOpeningLikeElement, result: Type): Signature {
             const namespace = getJsxNamespaceAt(node);
             const exports = namespace && getExportsOfSymbol(namespace);
@@ -30807,6 +30821,56 @@ namespace ts {
         }
 
         function resolveJsxOpeningLikeElement(node: JsxOpeningLikeElement, candidatesOutArray: Signature[] | undefined, checkMode: CheckMode): Signature {
+            if (isJsxInUniversalMode(node)) {
+                return resolveJsxOpeningLikeElementInUniversalMode(node, candidatesOutArray, checkMode);
+            }
+            return resolveJsxOpeningLikeElementInLegacyMode(node, candidatesOutArray, checkMode);
+        }
+
+        function resolveJsxOpeningLikeElementInUniversalMode(node: JsxOpeningLikeElement, candidatesOutArray: Signature[] | undefined, checkMode: CheckMode): Signature {
+            const normalizerType = getJsxType(JsxNames.NormalizedTag, node);
+            if (isErrorType(normalizerType) || !normalizerType.aliasTypeArguments) {
+                return resolveErrorCall(node);
+            }
+            let tagType: Type;
+            if (isJsxIntrinsicIdentifier(node.tagName)) {
+                Debug.assert(node.tagName.kind === SyntaxKind.Identifier);
+                tagType = getStringLiteralType(node.tagName.escapedText as string);
+            } else {
+                tagType = checkExpression(node.tagName);
+                if (node.typeArguments) {
+                    const typeArguments = map(node.typeArguments, getTypeFromTypeNode);
+                    const sig = getSingleCallSignature(tagType);
+                    if (sig) {
+                        const typeParameters = sig.typeParameters || [];
+                        const newSig = createSignatureInstantiation(sig, fillMissingTypeArguments(typeArguments, typeParameters, getMinTypeArgumentCount(typeParameters), isInJSFile(node)))
+                        tagType = getOrCreateTypeFromSignature(newSig);
+                    } else {
+                        const decl = tagType.symbol.declarations![0];
+                        const typeParameters = (decl && getTypeParametersFromDeclaration(decl as DeclarationWithTypeParameters)) || [];
+                        const mapper = createTypeMapper(typeParameters, fillMissingTypeArguments(typeArguments, typeParameters, getMinTypeArgumentCount(typeParameters), isInJSFile(node)));
+                        tagType = instantiateType(tagType, mapper);
+                        // TODO: error arg.length > param.length
+                    }
+                }
+            }
+            const mapper = createTypeMapper(normalizerType.aliasTypeArguments, [tagType]);
+            const instantiatedType = instantiateType(normalizerType, mapper);
+            if (instantiatedType === neverType) {
+                return resolveErrorCall(node);
+            }
+            const signature = getSingleCallSignature(instantiatedType);
+            if (!signature) {
+                return resolveErrorCall(node);
+            }
+            // ignore errors
+            if (node.typeArguments) {
+                signature.typeParameters = new Array(node.typeArguments.length).fill(anyType);
+            }
+            return resolveCall(node, [signature], candidatesOutArray, checkMode, SignatureFlags.None);
+        }
+
+        function resolveJsxOpeningLikeElementInLegacyMode(node: JsxOpeningLikeElement, candidatesOutArray: Signature[] | undefined, checkMode: CheckMode): Signature {
             if (isJsxIntrinsicIdentifier(node.tagName)) {
                 const result = getIntrinsicAttributesTypeFromJsxOpeningLikeElement(node);
                 const fakeSignature = createSignatureForJSXIntrinsic(node, result);
@@ -33727,7 +33791,7 @@ namespace ts {
             const uninstantiatedType = checkFunctionExpressionOrObjectLiteralMethod(node, checkMode);
             return instantiateTypeWithSingleGenericCallSignature(node, uninstantiatedType, checkMode);
         }
-
+        // TODO: jsx-ng instantiate here
         function instantiateTypeWithSingleGenericCallSignature(node: Expression | MethodDeclaration | QualifiedName, type: Type, checkMode?: CheckMode) {
             if (checkMode && checkMode & (CheckMode.Inferential | CheckMode.SkipGenericFunctions)) {
                 const callSignature = getSingleSignature(type, SignatureKind.Call, /*allowMembers*/ true);
@@ -44137,6 +44201,9 @@ namespace ts {
         export const IntrinsicAttributes = "IntrinsicAttributes" as __String;
         export const IntrinsicClassAttributes = "IntrinsicClassAttributes" as __String;
         export const LibraryManagedAttributes = "LibraryManagedAttributes" as __String;
+
+        export const UniversalMode = "UniversalMode" as __String;
+        export const NormalizedTag = "NormalizedTag" as __String;
     }
 
     function getIterationTypesKeyFromIterationTypeKind(typeKind: IterationTypeKind) {
