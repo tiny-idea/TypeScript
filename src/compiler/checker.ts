@@ -9381,7 +9381,7 @@ namespace ts {
             else if (isPropertyAssignment(declaration)) {
                 type = tryGetTypeFromEffectiveTypeNode(declaration) || checkPropertyAssignment(declaration);
             }
-            else if (isJsxAttribute(declaration)) {
+            else if (isJsxAttribute(declaration)) { // TODO: jsx-ng mark
                 type = tryGetTypeFromEffectiveTypeNode(declaration) || checkJsxAttribute(declaration);
             }
             else if (isShorthandPropertyAssignment(declaration)) {
@@ -13324,7 +13324,7 @@ namespace ts {
                 const aliasSymbol = getAliasSymbolForTypeNode(node);
                 const newAliasSymbol = aliasSymbol && (isLocalTypeAlias(symbol) || !isLocalTypeAlias(aliasSymbol)) ? aliasSymbol : undefined;
                 return getTypeAliasInstantiation(symbol, typeArgumentsFromTypeReferenceNode(node), newAliasSymbol, getTypeArgumentsForAliasSymbol(newAliasSymbol));
-            } // TODO: jsx-ng can be example for instantiate
+            }
             return checkNoTypeArguments(node, symbol) ? type : errorType;
         }
 
@@ -17315,7 +17315,7 @@ namespace ts {
                     return Debug.assertNever(child, "Found invalid jsx child");
             }
         }
-
+        // TODO: jsx-ng report error
         function elaborateJsxComponents(
             node: JsxAttributes,
             source: Type,
@@ -26290,6 +26290,28 @@ namespace ts {
         }
 
         function getContextualTypeForChildJsxExpression(node: JsxElement, child: JsxChild) {
+             if (isJsxInUniversalMode(node)) {
+                 return getContextualTypeForChildJsxExpressionInUniversalMode(node, child);
+             }
+             return getContextualTypeForChildJsxExpressionInLegacyMode(node, child);
+        }
+
+        function getContextualTypeForChildJsxExpressionInUniversalMode(node: JsxElement, child: JsxChild) {
+            const sig = getResolvedSignature(node.openingElement);
+            const realChildren = getSemanticJsxChildren(node.children);
+            const childIndex = realChildren.indexOf(child);
+            const childType = getJsxChildrenTypeInUniversalMode(sig);
+            return childType && (realChildren.length === 1 ? childType : mapType(childType, t => {
+                if (isArrayLikeType(t)) {
+                    return getIndexedAccessType(t, getNumberLiteralType(childIndex));
+                }
+                else {
+                    return t;
+                }
+            }, /*noReductions*/ true));
+        }
+
+        function getContextualTypeForChildJsxExpressionInLegacyMode(node: JsxElement, child: JsxChild) {
             const attributesType = getApparentTypeOfContextualType(node.openingElement.tagName);
             // JSX expression is in children of JSX Element, we will look for an "children" attribute (we get the name from JSX.ElementAttributesProperty)
             const jsxChildrenPropertyName = getJsxElementChildrenPropertyName(getJsxNamespaceAt(node));
@@ -26309,6 +26331,7 @@ namespace ts {
             }, /*noReductions*/ true));
         }
 
+        // TODO: jsx-ng check attr or children
         function getContextualTypeForJsxExpression(node: JsxExpression): Type | undefined {
             const exprParent = node.parent;
             return isJsxAttributeLike(exprParent)
@@ -26526,7 +26549,7 @@ namespace ts {
                 case SyntaxKind.JsxOpeningElement:
                 case SyntaxKind.JsxSelfClosingElement:
                     return getContextualJsxElementAttributesType(parent as JsxOpeningLikeElement, contextFlags);
-            }
+            } // TODO: jsx-ng ctxs
             return undefined;
 
             function tryFindWhenConstTypeReference(node: Expression) {
@@ -26560,6 +26583,10 @@ namespace ts {
 
         function getJsxPropsTypeInUniversalMode(sig: Signature) {
             return getTypeOfFirstParameterOfSignatureWithFallback(sig, unknownType);
+        }
+
+        function getJsxChildrenTypeInUniversalMode(sig: Signature) {
+            return sig.parameters.length > 1 ? getTypeAtPosition(sig, 1) : unknownType;
         }
 
         function getJsxPropsTypeFromCallSignature(sig: Signature, context: JsxOpeningLikeElement) {
@@ -27303,6 +27330,10 @@ namespace ts {
         }
 
         function checkJsxSelfClosingElement(node: JsxSelfClosingElement, _checkMode: CheckMode | undefined): Type {
+            if (isJsxInUniversalMode(node)) {
+                checkJsxSelfClosingElementDeferred(node)
+                return getReturnTypeOfSignature(getResolvedSignature(node));
+            }
             checkNodeDeferred(node);
             return getJsxElementTypeAt(node) || anyType;
         }
@@ -27323,8 +27354,11 @@ namespace ts {
         }
 
         function checkJsxElement(node: JsxElement, _checkMode: CheckMode | undefined): Type {
+            if (isJsxInUniversalMode(node)) {
+                checkJsxElementDeferred(node);
+                return getReturnTypeOfSignature(getResolvedSignature(node.openingElement));
+            }
             checkNodeDeferred(node);
-
             return getJsxElementTypeAt(node) || anyType;
         }
 
@@ -27342,6 +27376,10 @@ namespace ts {
             }
 
             checkJsxChildren(node);
+            if (isJsxInUniversalMode(node)) {
+                // TODO: jsx-ng fragment type
+                return anyType;
+            }
             return getJsxElementTypeAt(node) || anyType;
         }
 
@@ -27435,8 +27473,7 @@ namespace ts {
             // We have to check that openingElement of the parent is the one we are visiting as this may not be true for selfClosingElement
             if (parent && parent.openingElement === openingLikeElement && parent.children.length > 0) {
                 const childrenTypes: Type[] = checkJsxChildren(parent, checkMode);
-
-                if (!hasSpreadAnyType && jsxChildrenPropertyName && jsxChildrenPropertyName !== "") {
+                if (!hasSpreadAnyType && !isJsxInUniversalMode(openingLikeElement) && jsxChildrenPropertyName && jsxChildrenPropertyName !== "") {
                     // Error if there is a attribute named "children" explicitly specified and children element.
                     // This is because children element will overwrite the value from attributes.
                     // Note: we will not warn "children" attribute overwritten if "children" attribute is specified in object spread.
@@ -27459,7 +27496,6 @@ namespace ts {
                     childPropMap.set(jsxChildrenPropertyName, childrenPropSymbol);
                     spread = getSpreadType(spread, createAnonymousType(attributes.symbol, childPropMap, emptyArray, emptyArray, emptyArray),
                         attributes.symbol, objectFlags, /*readonly*/ false);
-
                 }
             }
 
@@ -27483,7 +27519,7 @@ namespace ts {
                 return result;
             }
         }
-
+        // TODO: jsx-ng get children type here
         function checkJsxChildren(node: JsxElement | JsxFragment, checkMode?: CheckMode) {
             const childrenTypes: Type[] = [];
             for (const child of node.children) {
@@ -27739,7 +27775,11 @@ namespace ts {
             return anyType;
         }
 
-        function checkJsxReturnAssignableToAppropriateBound(refKind: JsxReferenceKind, elemInstanceType: Type, openingLikeElement: JsxOpeningLikeElement) {
+        function checkJsxReturnAssignableToAppropriateBound(elemInstanceType: Type, openingLikeElement: JsxOpeningLikeElement) {
+            if (isJsxInUniversalMode(openingLikeElement)) {
+                return;
+            }
+            const refKind = getJsxReferenceKind(openingLikeElement);
             if (refKind === JsxReferenceKind.Function) {
                 const sfcReturnConstraint = getJsxStatelessElementTypeAt(openingLikeElement);
                 if (sfcReturnConstraint) {
@@ -27878,7 +27918,7 @@ namespace ts {
                 const jsxOpeningLikeNode = node as JsxOpeningLikeElement;
                 const sig = getResolvedSignature(jsxOpeningLikeNode);
                 checkDeprecatedSignature(sig, node as JsxOpeningLikeElement);
-                checkJsxReturnAssignableToAppropriateBound(getJsxReferenceKind(jsxOpeningLikeNode), getReturnTypeOfSignature(sig), jsxOpeningLikeNode);
+                checkJsxReturnAssignableToAppropriateBound(getReturnTypeOfSignature(sig), jsxOpeningLikeNode);
             }
         }
 
@@ -27924,7 +27964,7 @@ namespace ts {
                 type.flags & TypeFlags.Union && some((type as UnionType).types, isExcessPropertyCheckTarget) ||
                 type.flags & TypeFlags.Intersection && every((type as IntersectionType).types, isExcessPropertyCheckTarget));
         }
-
+        // TODO: jsx-ng support object spread
         function checkJsxExpression(node: JsxExpression, checkMode?: CheckMode) {
             checkGrammarJsxExpression(node);
             if (node.expression) {
@@ -30865,7 +30905,7 @@ namespace ts {
             }
             // ignore errors
             if (node.typeArguments) {
-                signature.typeParameters = new Array(node.typeArguments.length).fill(anyType);
+                signature.typeParameters = new Array(node.typeArguments.length).fill(createTypeParameter());
             }
             return resolveCall(node, [signature], candidatesOutArray, checkMode, SignatureFlags.None);
         }
