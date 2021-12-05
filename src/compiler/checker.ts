@@ -27333,6 +27333,16 @@ namespace ts {
         }
 
         function checkJsxSelfClosingElement(node: JsxSelfClosingElement, _checkMode: CheckMode | undefined): Type {
+            if (isJsxInUniversalMode(node)) {
+                const links = getNodeLinks(node);
+                if (!links.resolvedSignature) {
+                    checkJsxSelfClosingElementDeferred(node);
+                }
+                if (links.resolvedSignature === resolvingSignature) {
+                    return anyType;
+                }
+                return getReturnTypeOfSignature(getResolvedSignature(node));
+            }
             checkNodeDeferred(node);
             return getJsxElementTypeAt(node) || anyType;
         }
@@ -27353,6 +27363,16 @@ namespace ts {
         }
 
         function checkJsxElement(node: JsxElement, _checkMode: CheckMode | undefined): Type {
+            if (isJsxInUniversalMode(node)) {
+                const links = getNodeLinks(node);
+                if (!links.resolvedSignature) {
+                    checkJsxElementDeferred(node);
+                }
+                if (links.resolvedSignature === resolvingSignature) {
+                    return anyType;
+                }
+                return getReturnTypeOfSignature(getResolvedSignature(node.openingElement));
+            }
             checkNodeDeferred(node);
             return getJsxElementTypeAt(node) || anyType;
         }
